@@ -1,0 +1,86 @@
+---
+title: "Astrios QC tools"
+author: "Created by: Joshua L Schipper"
+date: "September 4, 2019"
+output: html_document
+runtime: shiny
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, include = TRUE, warning = FALSE, message = FALSE)
+
+# packages --------------------------------------------------------------------
+library(shiny)
+
+```
+
+```{r}
+
+shinyApp(
+  ui <- fluidPage( # setting up user interface
+    
+    # file upload manager
+    fileInput("files", label = h3("Select QC files"),
+              accept = c(
+                "text/csv",
+                "text/comma-separated-values,text/plain",
+                ".csv"),
+              multiple = TRUE),
+    
+    uiOutput("buttons")
+    
+  
+  ),
+  
+  server <- function(input, output, session) { # actually doing the stuff
+    
+    # Only show buttons for reports after file(s) have been uploaded
+    output$buttons <- renderUI ({ 
+      if(is.null(input$files)){return()} #don't do anything if no files
+      list( #show these action buttons if files are uploaded
+        downloadButton("LJreport", "Generate LJ Plots"),
+        downloadButton("QCreport", "Generate QC report")
+        )
+    })
+    
+    # Generate QC report on button click
+    output$QCreport <- downloadHandler(
+      filename = function() { paste("QC_report_", format(Sys.time(), "%Y-%m-%d_%H.%M.%S"), ".html", sep="") },
+      content = function(file) {
+        tempReport <- file.path(tempdir(), "QCreport.Rmd")
+        file.copy("QCreport.Rmd", tempReport, overwrite = TRUE)
+        params <- list(f=input$files)
+        rmarkdown::render(tempReport, output_file = file,
+                          params = params,
+                          envir = new.env(parent = globalenv()) )
+      }
+    )
+    
+    # Generate LJ plots for CV on button click
+    output$LJreport <- downloadHandler(
+      filename = function() { paste("LJ_report_", format(Sys.time(), "%Y-%m-%d_%H.%M.%S"), ".html", sep="") },
+      content = function(file) {
+        tempReport <- file.path(tempdir(), "LJreport.Rmd")
+        file.copy("LJreport.Rmd", tempReport, overwrite = TRUE)
+        params <- list(f=input$files)
+        rmarkdown::render(tempReport, output_file = file,
+                          params = params,
+                          envir = new.env(parent = globalenv()) )
+      }
+    )   
+    
+
+  }
+)
+
+```
+ LJ Plot Report Notes:  
+ -This can take a few seconds to run, especially if there are a lot of files.
+ -This will work for different laser/detector configurations, although it is not recommended to use with a range of QC files that include large numbers of different configurations.  
+ -If multiple QC files exist for a given day, only the last one will be used.  
+ -Horizontal line represents most current pass threshold.  
+   
+ QC report Notes:  
+ -If more than one file is selected, the report will only be generated for the latest one.  
+ -PMT voltage, and CV values that did not pass are colored in red.  
+ 

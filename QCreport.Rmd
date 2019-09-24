@@ -1,0 +1,107 @@
+---
+#title: "LJ plots for MoFlo Astrios"
+#author: "Joshua L Schipper"
+#date: "July 30, 2019"
+output: html_document
+params:
+  f: NA
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo=FALSE, include=TRUE, warning=FALSE, message=FALSE, strip.white=TRUE)
+
+# packages --------------------------------------------------------------------
+library(tidyverse)
+library(kableExtra)
+
+```
+
+```{r }
+
+# Get file name(s), passed from Shiny script that's calling this markdown
+files <- params$f
+
+# Get most recent file, if more than one in the list
+QCfile <- files[1,]
+
+# Read in data
+all_data <- read.csv(QCfile$datapath , header = FALSE, stringsAsFactors = FALSE)
+
+# Get important line numbers from the QC file
+lt_start <- which(all_data == "Laser Delays", arr.ind = TRUE)[1]+1
+lt_end <- which(all_data == "Sheath Pressure (PSI)", arr.ind = TRUE)[1]-1
+laser_ct <- lt_end - lt_start
+data_start <- which(all_data == "QC Values")+1
+
+# Get date/time of the QC file
+QCdatetime <- parse_datetime(paste(all_data[which(all_data == "Date"),2],all_data[which(all_data == "Time"),2]), "%* %d %b %Y %H:%M:%S")
+
+# Create the laser info table
+lt <- as_tibble(all_data)%>%
+  slice((lt_start+1):lt_end) %>%
+  select(1:5)  %>%
+  rename( # Giving appropriate column names
+    "Laser (nm)" = V1,
+    "Pinhole" = V2,
+    "State" = V3,
+    "Laser Delay" = V4,
+    "Output %" = V5 )
+
+# Create the QC data table
+QC_data <- as_tibble(all_data) %>%
+  slice(-1:-(data_start)) 
+
+# Making QC table look nice
+QC_data <- QC_data %>%
+  select(1,5,3,14,12,10,11,7,2) %>%
+  rename("Channel" = 1,
+         "Max PMT Volts" = 2,
+         "PMT Volts" = 3,
+         "Max CV" = 4,
+         "CV" = 5,
+         "Min Median" = 6,
+         "Max Median" = 7,
+         "Median" = 8,
+         "Status" = 9) %>%
+  mutate_at(vars("Max CV","CV","Min Median","Max Median","Median"),funs(as.double )) %>%
+  mutate_at(vars("Max PMT Volts", "PMT Volts"),funs(as.integer))  
+
+
+
+```
+
+##### Astrios QC Report, `r QCdatetime`  
+Nozzle size:     `r all_data[(lt_end)+3,2]` um | Sheath Pressure: `r all_data[(lt_end)+1,2]` PSI | Sample Pressure: `r all_data[(lt_end)+2,2]` PSI  
+
+```{r }
+
+# Make and output the laser table to the markdown page
+lt %>%
+  kable(align = "c") %>%
+  kable_styling(bootstrap_options = "condensed", full_width = F, position = "left", font_size = 10)
+
+```
+
+```{r }
+
+# Make and output the QC data table to the markdown page
+QC_data %>%
+  mutate(
+    Status = cell_spec(Status, "html", color = ifelse( Status == "Pass", "green", "red" )), #color "Pass" green and "Fail" red
+    `PMT Volts` = cell_spec(`PMT Volts`, "html", color = ifelse(`PMT Volts` > `Max PMT Volts`, "red", "black")),
+    `CV` = cell_spec(`CV`, "html", color = ifelse(`CV` > `Max CV`, "red", "black"))
+    ) %>%
+  kable(format = "html", escape = F, align = "c") %>%
+  column_spec(9, bold = T) %>%
+  kable_styling(bootstrap_options = "condensed", full_width = F, position = "left", font_size = 10) 
+
+cat("\n")
+
+```
+
+
+
+
+
+
+

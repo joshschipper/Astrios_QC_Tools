@@ -1,0 +1,283 @@
+---
+output: html_document
+params:
+  f: NA
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = FALSE, include = TRUE, warning = FALSE, message = FALSE)
+
+# packages --------------------------------------------------------------------
+library(tidyverse)
+library(ggplot2)
+library(cowplot)
+library(grid)
+library(gridExtra)
+
+```
+
+```{r functions}
+
+sort_files <- function(file.list){
+  
+  # Only getting Astrios QC files
+  file.list <- select(filter(file.list, grepl(c("Astrios|.csv"), name) ), -c("size","type"))
+  
+  # Gets the datetime from the file name (column 1 in the list), and creates a new column with this value
+  file.list$DateTime <- parse_datetime(file.list$name, "%* %d %b %Y - %H.%M.%S %*")
+  
+  # Takes the datetime value (col 2), and creates two new columns for separate date and time
+  file.list <- file.list %>%
+    mutate(Date = as.Date(DateTime),      #storing as actual date function
+           Time = format(DateTime, format="%H:%M:%S") )
+
+
+  # Creates a new sorted file list, by first using dplyr to group rows by date,
+  # then getting the latest time for that date using summarise, then doing an
+  # inner join with this new tibble and the original list to only select those
+  # rows that had this latest date and time.
+  file.list.srt <- inner_join(file.list,
+                       (file.list %>%
+                          group_by(Date) %>%
+                          summarise(Time = max(Time))),
+                       by=c("Date", "Time")) #performing join based on both Date and Time
+  return(file.list.srt)
+}
+
+get_data <- function(file.list){
+  
+  CV_df <- NULL # Creating an empty set that will be filled in with CV data
+  V_df <- NULL # Creating an empty set that will be filled in with Voltage data
+  max_CV <- NULL 
+  max_V <- NULL 
+  
+  for (i in 1:nrow(file.list)) { # for each line in the list of files
+    filename <- file.list[i,]$name
+    filepath <- file.list[i,]$datapath
+    filedt <- file.list[i,]$DateTime
+    linestart <- grep(pattern="Parameter", x = readLines(filepath)) -1
+    
+    # Reading in the csv file, using data_path specified above
+    # Note, this will throw parsing warings because one row has 
+    # an extra column (for trigger threshold), but these can be ignored
+    datafile <- read_csv(filepath,
+                        skip=linestart,
+                        # col_names=TRUE#, # including column header
+                        col_types = cols_only("Parameter" = col_guess(),
+                          "Adjusted PMT Volts" = col_guess(),
+                          "Maximum PMT Volts" = col_guess(),
+                          "Measured CV" = col_guess(),
+                          "Maximum CV" = col_guess() )
+                )
+                        
+    
+    d2 <- datafile %>% # Using gather and spread to transpose the data in a tidy way
+      gather("x", val, 2:ncol(datafile)) %>%
+      spread("Parameter", val)
+
+
+    # Getting CV data
+
+    CV_data <- slice(d2, 4) # Getting the CV values
+    CV_data[1][1] <- filedt # Setting the first column to date
+    
+    if (is.null(CV_df)) {   # If this is the first round (and the combined data is empty)
+      CV_df <- CV_data
+      max_CV <- slice(d2, 2)}
+
+    max_CV <- left_join(max_CV, slice(d2,2))
+    CV_df <- full_join(CV_df, CV_data)   # Adding the new data to the combined data, using a full join
+
+    # Getting Voltage data
+
+    V_data <- slice(d2, 1)  # Getting the voltages
+    V_data[1][1] <- filedt  # Setting the first column to date
+    
+    if (is.null(V_df)) {    # If this is the first round (and the combined data is empty)
+      V_df <- V_data
+      max_V <- slice(d2,3)}
+
+    max_V <- left_join(max_V, slice(d2,3))
+    V_df <- full_join(V_df, V_data)   # Adding the new data to the combined data, using a full join
+
+  } #ending If statement
+    
+  CV_df <- rename(CV_df[,order(colnames(CV_df))], "Date" = x) #changing the date column title to "Date"
+  V_df <- rename(V_df[,order(colnames(V_df))], "Date" = x)
+  
+  return(list(test = V_df,
+              CV = CV_df,
+              max_CV = max_CV,
+              V = V_df,
+              max_V = max_V ) )
+  
+
+} #ending function
+
+# Color Function - get color for plot from wavelength
+color_selector <- function(wl) {
+  if (wl <= 375){color <- "purple4"}
+  if (wl > 375 & wl <= 450){color <- "purple"}
+  if (wl > 450 & wl <= 500){color <- "blue"}
+  if (wl > 500 & wl <= 550){color <- "green3"}
+  if (wl > 550 & wl <= 570){color <- "yellowgreen"}
+  if (wl > 570 & wl <= 590){color <- "gold2"}
+  if (wl > 590 & wl <= 610){color <- "orange"}
+  if (wl > 610 & wl <= 650){color <- "red"}
+  if (wl > 650 & wl <= 700){color <- "red3"}
+  if (wl > 700 & wl <= 800){color <- "red4"}
+  if (wl > 800){color <- "black"}
+  # if this isn't a number, just set color to grey
+  if (str_detect(wl,"[:alpha:]")){color <- "grey60"} 
+  
+  return(color)
+}
+
+makeplots <- function(df, LJ_type, max_cutoff) {
+
+  # Setting initial parameters
+  
+  
+  # converting dataframe to long form
+  df_long <- df %>%
+    gather(channel, val, contains("-")) %>%
+    mutate(laser = str_sub(channel,1,3) )
+  
+  # making a table with laser and channel info
+  channel_stats <- as.data.frame(table(df_long$laser) / length(df$Date) )
+  # Getting number of lasers and max channels for building plot grid
+  ncols <- max(channel_stats$Freq)
+  nrows <- length(channel_stats$Var1)
+  # Calculating x-axis label range
+  mindate <- min(df_long$Date)
+  maxdate <- max(df_long$Date)
+  listnum <- length(unique(df_long$Date))
+  if (listnum >=5){datetick <- 5}
+  if (listnum < 5){datetick <- listnum}
+  breaks = seq(mindate, maxdate, length.out = as.integer(datetick))
+  plotcounter=1 # setting this initially for keeping track of where we're adding the plot to a list
+  myplotsall=list() # the list we'll be adding all the plots to
+  
+  if (LJ_type == "CV") {
+    LJ_ylim = coord_cartesian(ylim = c(0,10)) 
+    new_width <- c(1.17,rep(1,ncols-1)) #1.04 for scale of 0-8, 1.17 for scale of 0-10
+    #max_cutoff <- max_CV
+    typelabel <- "CV"
+  }
+  if (LJ_type == "V")  {
+    LJ_ylim = coord_cartesian(ylim = c(200,900)) 
+    new_width <- c(1.15,rep(1,ncols-1))
+    #max_cutoff <- max_V
+    typelabel <- "Voltage"
+  }
+  
+  for (i in seq(nrows)) { # For every laser
+    laser_type <- channel_stats$Var1[i] # Getting which laser we're on
+    laser_col <- color_selector(as.character(laser_type)) # getting the color from the function above
+    #print(c(laser_type,laser_col))
+    laser_data <- subset(df_long, laser %in% laser_type) # Getting data from just this laser (all channels)
+    channels <- unique(laser_data$channel) # Getting all the different channels for this laser
+    
+    for (j in seq(ncols)){ # For every channel for this laser
+      # Only showing Y-axis labels for first column of plots, and X-axis labels for bottom row
+      if ( i == nrows & j == 1){ # If this is the bottom row, and is in the first column
+        mytheme <- theme(
+          #plot.title = element_text(size = 10, color = "red"),
+          axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5, size = 8),
+          axis.text.y = element_text(size = 8),
+          axis.title.x = element_blank(),
+          axis.title.y = element_blank() ) }
+      if (i != nrows & j == 1) { # If this is NOT the bottom row, and is in the first column
+        mytheme <- theme(
+          #plot.title = element_text(size = 10, color = "red"),
+          axis.text.x = element_blank(),
+          axis.text.y = element_text(size = 8),
+          axis.title.x = element_blank(),
+          axis.title.y = element_blank() ) }
+      if (i == nrows & j != 1) { # If this is the bottom row, and is NOT in the first column
+        mytheme <- theme(
+          #plot.title = element_text(size = 10, color = "red"),
+          axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5, size = 8),
+          axis.title.y = element_blank(),
+          axis.text.y = element_blank(),
+          axis.title.x = element_blank()) }
+      if (i != nrows & j != 1) { # If this is NOT the bottom row, and is NOT in the first column
+        mytheme <- theme(
+          #plot.title = element_text(size = 10, color = "red"),
+          axis.text.x = element_blank(),
+          axis.title.x = element_blank(),
+          axis.text.y = element_blank(),
+          axis.title.y = element_blank() ) }
+      if (j <= channel_stats$Freq[i]){ # As long as a channel exists for this plot column
+        channel_name <- channels[j]
+        channel_col <- color_selector(substr(channel_name,5,7))
+        plot_data <- subset(laser_data, channel %in% channel_name) # Getting the data for this plot
+        #print(c(channel_name, channel_col))
+        plt <- ggplot(plot_data, aes(x=Date,y=val) ) + # Setting up the plot
+          labs(title=channel_name)+ # setting the channel name as plot title
+          geom_line(color=channel_col, lwd=0.8)+ # Line plot
+          geom_hline(yintercept=as.numeric(max_cutoff[channel_name]))+
+          geom_point(size=1)+ # with points
+          scale_x_datetime(date_labels = "%Y-%m-%d", breaks = breaks )+ # Setting the X-axis scale
+          theme_bw() +
+          theme(panel.border = element_rect(color = laser_col, fill = NA, size = 0.8),
+          plot.title = element_text(size = 10, vjust=0),
+          panel.grid.major = element_line(color = "grey95"),
+          panel.grid.minor = element_line(color = "grey90"),
+          plot.margin = unit(c(0,0.1,0.2,0.1), "cm") )+
+          LJ_ylim } # setting limits for y-axis 
+        
+      else { # If we need a blank plot as a placeholder because there are more columns
+             # than channels for this laser
+        plt <- ggplot(plot_data, aes(x=Date,y=val))+ # Using last set of data only to define plot axis
+          labs(title="")+ 
+          scale_x_datetime(date_labels = "%Y-%m-%d", breaks = breaks )+
+          theme_bw()+
+          theme(plot.title = element_text(size = 8),
+          panel.grid.major.x = element_line(color = "grey95"),
+          panel.grid.major.y = element_blank(),
+          panel.grid.minor = element_blank(),
+          panel.border = element_blank(),
+          axis.ticks = element_blank(),
+          plot.margin = unit(c(0,0.1,0.2,0.1), "cm"))+
+          LJ_ylim }
+      
+      myplotsall[[plotcounter]] <- plt + mytheme  # Saving the plot with appropriate theme defined above to a list
+      plotcounter = plotcounter + 1
+      
+    }
+  }
+  
+  title <- ggdraw() + draw_label(paste("LJ plots: ", typelabel," ", as.Date(mindate), "to", as.Date(maxdate)), size = 12 )
+  plots <- plot_grid( # This makes a grid of plots from our list
+    plotlist = myplotsall, # the list of plots
+    ncol = ncols, # Setting the number of columns
+    rel_heights = c(rep(1,nrows-1),1.5), # adjusting height of bottom row due to axis labels
+    rel_widths = new_width ) # adjusting width of first column due to axis labels
+  
+  myplot <- plot_grid(title, plots, ncol=1, rel_heights=c(0.1,1), 
+            labels = "Horizontal line = pass threshold", 
+            label_size = 8, vjust = 8, hjust = -0.1)
+  #savename = paste("QC_LJ-plots_", LJ_type, "_", as.Date(mindate), "_to_", as.Date(maxdate), ".pdf", sep = "" )
+  #ggsave(savename, plot=myplot, width = 10, height = 7.5, dpi = 300)
+  return(myplot)
+
+}
+
+data <- get_data(sort_files(params$f))
+
+```
+
+
+```{r fig.width=10, fig.height=7.5}
+
+makeplots(data$CV, "CV", data$max_CV)
+
+```
+
+```{r fig.width=10, fig.height=7.5}
+
+makeplots(data$V, "V", data$max_V)
+
+cat("\n\n\n")
+```
